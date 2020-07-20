@@ -1,0 +1,1487 @@
+---
+title: 'In a Pinch: An evaluation of 5v5 Offensive Zone Aggressiveness by Defensemen'
+author: "Greg Ackerman GregALytics@u.northwestern.edu"
+date: "12/26/2019 - Columbus Blue Jackets Hockey Analytics Competition"
+output: html_document
+---
+
+```{r load, include = FALSE}
+library(tidyverse)
+library(readr)
+library(data.table)
+library(scales)
+library(plotly)
+library(ggcorrplot)
+library(kableExtra)
+library(DT)
+library(readxl)
+
+
+setwd("~/Dropbox/sportlogiq_ahl_dataset/games")
+
+################## Get Game Information
+
+game_id_events <- list.files(pattern = "*events.csv") %>% substr(1, 5)
+
+events_temp <- 
+  list.files(pattern = "*events.csv") %>% 
+  map_df(~fread(.) %>% mutate(n = 1:n())) %>%
+  mutate(ind = 1:n())
+
+ind <- which(events_temp$n == 1)
+
+inds <- data.frame(ind, game_id_events) 
+
+rm(game_id_events)
+
+events <- events_temp %>%
+  left_join(inds) %>%
+  fill(game_id_events) %>%
+  select(-ind, - n) %>%
+  mutate(playersonice = gsub("\\[|\\]|\\'", "", playersonice),
+         game_id_events = as.numeric(levels(game_id_events)[game_id_events])) %>%
+  separate(playersonice, c("p1", "p2", "p3", "p4", "p5", "p6", "p7", "p8", "p9", "p10", "p11", "p12"),
+           sep = ", ") %>%
+  rename(gameid = game_id_events) %>%
+  as_tibble()
+
+rm(events_temp); rm(ind); rm(inds)
+
+game_id_rosters <- list.files(pattern = "*rosters.csv") %>% substr(1, 5)
+
+rosters_temp <- 
+  list.files(pattern = "*rosters.csv") %>%
+  map_df(~fread(.) %>% mutate(n = 1:n())) %>%
+  mutate(ind = 1:n())
+
+ 
+ind_roster <- which(rosters_temp$n == 1)
+inds_roster <- data.frame(ind_roster, game_id_rosters) 
+
+rm(game_id_rosters)
+
+rosters <- rosters_temp %>%
+  left_join(inds_roster, by = c("ind" = "ind_roster")) %>%
+  fill(game_id_rosters) %>%
+  select(-n, -ind) %>%
+  mutate(game_id_rosters = as.numeric(levels(game_id_rosters)[game_id_rosters])) %>%
+  rename(gameid = game_id_rosters) %>%
+  unite(player, firstname:lastname, sep = " ")
+
+rm(inds_roster); rm(ind_roster); rm(rosters_temp)
+
+setwd("~/Dropbox/sportlogiq_ahl_dataset")
+#setwd("C:/Users/gackerman/Dropbox/sportlogiq_ahl_dataset")
+scoreadj <- read_excel("corsica_score_adjustment.xlsx")
+
+game_info <- read_csv("game_info.csv")
+player_info <- read_csv("player_info.csv") %>%
+  mutate(player_name = paste(firstName, lastName))
+team_info <- read_csv("team_info.csv")
+team_colors <- read_csv("team_colors.csv")
+
+
+tmp <- events %>%
+  left_join(team_info) %>%
+  left_join(rosters) %>%
+  left_join(game_info) %>%
+  arrange(gameid, period, gametime) %>%
+  mutate(
+    playid = 1:n(),
+    team_lag = lag(teamid),
+    same_team = teamid ==team_lag,
+    xcoord_lag = lag(xcoord),
+    ycoord_lag = lag(ycoord),
+    xcoord_lead = lead(xcoord),
+    ycoord_lead = lead(ycoord),
+    xadjcoord_lag = lag(xadjcoord),
+    yadjcoord_lag = lag(yadjcoord),
+    xadjcoord_lead = lead(xadjcoord),
+    yadjcoord_lead = lead(yadjcoord),
+    name_lag = lag(name),
+    name_lag_2 = lag(name, 2),
+    name_lag_3 = lag(name, 3),
+    name_lag_4 = lag(name, 4),
+    name_lag_5 = lag(name, 5),
+    name_lead = lead(name),
+    teamid_lead = lead(teamid),
+    outcome_lead = lead(outcome),
+    name_lead_2 = lead(name, 2),
+    name_lead_3 = lead(name, 3), 
+    name_lead_4 = lead(name, 4),
+    name_lead_5 = lead(name, 5),
+    playzone_lead = lead(name, 1),
+    type_lag = lag(type),
+    type_lead = lead(type),
+    playzone_lag = lag(playzone),
+    playzone_lead = lead(playzone),
+    playsection_lag = lag(playsection),
+    playsection_lead = lead(playsection),
+    section_combo = paste0(playsection, "-", playsection_lead),
+    zone_combo = paste0(playzone, "-", playzone_lead), 
+    outcome_lag = lag(outcome),
+    periodtime_lag = lag(periodtime),
+    periodtime_lead = lead(periodtime),
+    gametime_lag = lag(gametime),
+    gametime_lead = lead(gametime),
+    play_duration = ifelse(lead(period) == period, gametime_lead - gametime, 0),
+    distance = sqrt((xcoord - xcoord_lead)**2 + (ycoord - ycoord_lead)**2),
+    name = ifelse(name == "assist", paste0(name, "_", type), name),
+    success = ifelse(outcome == "successful", 1, 0),
+    pinch = ifelse(xadjcoord > 54, 1, 0) & position == "D")
+
+
+################################################################################################################################
+############################################## FUNCTIONS #######################################################################
+################################################################################################################################
+
+
+# Function to Filter Sample of Players Needed for Analysis
+filter_sample <- function(df) {
+  tmp %>%
+    filter(playzone == "oz",
+           skatersonicesituation == "5v5",
+           name %in% c("pass", "reception", "shot", "lpr", "puckprotection", "block"))
+}
+
+
+############ Functions to plot O-zone contours for all defensemen of a single team
+
+plot_defensive_unit_ozone_contours <- function(team_abbrev, min_games = 20, strength = "5v5") {
+  team_name <-
+    team_info %>%
+    filter(teamshorthand == team_abbrev) %>%
+    mutate(team_full_name = paste(teamlocation, teamname)) %>%
+    select(team_full_name)
+  
+  games_played <-
+    tmp %>%
+    group_by(playerid, teamshorthand, position) %>%
+    summarise(games = n_distinct(gameid)) %>%
+    filter(position == "D",
+           games > min_games,
+           teamshorthand == team_abbrev) %>% 
+    ungroup() %>%
+    select(playerid, games)
+  
+  tmp %>%
+    inner_join(games_played) %>%
+    filter(name %in% c("pass", "reception", "shot", "lpr", "puckprotection", "block"),
+           skatersonicesituation == strength,
+           playzone == "oz") %>%
+    ggplot(aes(x = xadjcoord, y = yadjcoord)) +
+    geom_density_2d() +
+    gg_rink() +
+    geom_vline(xintercept = 54) +
+    coord_flip() + 
+    facet_wrap(~player) +
+    labs(title = paste(team_name[1], "Defensemen Shot Contours Min", min_games, "GP"),
+         subtitle = paste("All", strength, "Passes, Shots, Loose Puck Recoveries, and Puck Protections"))
+}
+
+plot_player_events_by_type <- function(player_full_name, strength = "5v5") {
+  player_to_plot <- player_full_name
+  
+  tmp %>%
+    filter(player == player_to_plot,
+           playzone == "oz",
+           skatersonicesituation == strength,
+           name %in% c("pass", "reception", "shot", "lpr", "puckprotection", "block")) %>%
+    ggplot(aes(x = xadjcoord, y = yadjcoord, color = outcome)) +
+    geom_point() +
+    gg_rink() + 
+    geom_vline(xintercept = 54) +
+    coord_flip() +
+    facet_wrap(~name) +
+    labs(title = paste0(player_full_name, "'s Offensive Zone Locations at ", strength))
+}
+
+plot_player_compare <- function(players, strength = "5v5") {
+  tmp %>%
+    filter(player %in% players,
+           playzone == "oz",
+           skatersonicesituation == strength,
+           name %in% c("pass", "reception", "shot", "lpr", "puckprotection")) %>%
+    ggplot(aes(x = xadjcoord, y = yadjcoord)) +
+    geom_density_2d() +
+    geom_point() +
+    geom_vline(xintercept = 54) +
+    gg_rink() + 
+    coord_flip() +
+    facet_wrap(~player)
+}
+
+plot_team_x_coords <-function(team_abbrev, min_games = 20, strength = "5v5") {
+  team_name <-
+    team_info %>%
+    filter(teamshorthand == team_abbrev) %>%
+    mutate(team_full_name = paste(teamlocation, teamname)) %>%
+    select(team_full_name)
+  
+  games_played <-
+    tmp %>%
+    group_by(playerid, teamshorthand, position) %>%
+    summarise(games = n_distinct(gameid)) %>%
+    filter(position == "D",
+           games > min_games,
+           teamshorthand == team_abbrev) %>% 
+    ungroup() %>%
+    select(playerid, games)
+  
+  tmp %>%
+    inner_join(games_played) %>%
+    filter(name %in% c("pass", "reception", "shot", "lpr", "puckprotection"),
+           skatersonicesituation == strength,
+           playzone == "oz") %>%
+    ggplot(aes(x = reorder(player, xadjcoord, fun = MEDIAN), y = xadjcoord)) +
+    geom_boxplot() +
+    coord_flip() +
+    labs(title = paste(team_name, "Event X-Coordinate Chart"),
+         x = "player",
+         y = "X-Coordinate (Adjusted)")
+}
+
+
+
+gg_rink <- function(side = "right", specs = "nhl"){
+  
+  ### this function uses ggplot's annotate()
+  # to draw the rink.
+  # I recommend calling this function PRIOR to invoking
+  # geoms for data so that the points aren't covered
+  # by the annotations
+  
+  ### inputs:
+  #     1. side = which side to plot: "right" (default) or "left"
+  #     2. specs = which rink size to use: "nhl" (default) or "iihf" for
+  #        international
+  
+  # check inputs
+  side <- tolower(side)
+  specs <- tolower(specs)
+  stopifnot(side %in% c("right", "left"))
+  stopifnot(specs %in% c("nhl", "iihf"))
+  
+  side <- switch(side,
+                 "right" = 1,
+                 "left" = -1)
+  
+  nsteps <- 1001 # line resolution for drawing circles/segments
+  circle <- seq(0, 2*pi, length = nsteps) # angles to draw a circle
+  
+  switch(specs,
+         "nhl" = {
+           # NHL specifications
+           # all units in feet
+           
+           ### rink boundaries ###
+           ## assumed to be standard 200x85ft dimensions
+           x_max <- 100
+           y_max <- 42.5
+           y_min <- -y_max
+           # blue line 75' from end boards
+           x_blue <- x_max - 75
+           # goal line 11' from end boards
+           x_goal <- x_max - 11
+           
+           ### parameter setup
+           ## corners rounded in arc of circle with 28' radius
+           r_corner <- 28
+           
+           ## crease semi-circle
+           # 6' radius from center of goal line starting 4.5' out
+           crease_end <- 4.5
+           r_crease <- 6
+           # deepest point of net is 40"
+           net_depth <- 40/12
+           # crease is 8' long; goal posts 6' apart
+           goal_post_start <- 6/2
+           crease_start_y <- 8/2
+           # inner crease lines begin 4' from goal line
+           # extend 5" into crease
+           crease_small_start <- 4
+           crease_small_length <- 5/12
+           
+           ## face-off circle dots and lines
+           # dot locations: 20' from goal line, 22' in each y direction
+           x_dot_dist <- 20
+           y_faceoff_dot <- 22
+           # face-off circle radius 15'
+           r_faceoff <- 15
+           # hash marks 2' long, 5'7" apart
+           hash_length <- 2
+           hash_space <- 67/12
+           # circle inner lines:
+           # x-direction: lines 4' apart, so start 2' from dot
+           # y-direction: lines 18" apart, so start 9" from dot
+           inner_start_x <- 2
+           inner_start_y <- 1.5/2
+           # lines parallel to side boards: 4' long
+           par_side_length <- 4
+           # lines parallel to end boards: 3' long
+           par_end_length <- 3
+           
+           ## other parameters
+           # neutral zone dots are 5' from blue line, 44' apart
+           x_dot_neutral <- 5
+           # ref circle 5m radius
+           r_ref <- 5
+           ## trapezoid (NHL only)
+           # begins 8' from each goal post
+           # bottom base is 28' long
+           y_traps_start <- goal_post_start + 8
+           y_traps_end <- 14
+         },
+         "iihf" = {
+           # IIHF specifications
+           # all units in meters
+           
+           ### rink boundaries ###
+           ## assumed to be standard 60x30m dimensions
+           x_max <- 30
+           y_max <- 15
+           y_min <- -y_max
+           # blue line 22.86m from end boards, 30cm wide
+           x_blue <- x_max - 22.86
+           # goal line 4m from end boards
+           x_goal <- x_max - 4
+           
+           ### parameter setup
+           ## corners rounded in arc of circle with 8.5m radius
+           r_corner <- 8.5
+           
+           ## crease semi-circle
+           # 183cm radius from center of goal line starting 137cm out
+           crease_end <- 1.37
+           r_crease <- 1.83
+           # deepest point of net is 1.12m
+           net_depth <- 1.12
+           # crease is 244cm long; goal posts 183.5cm apart
+           goal_post_start <- 1.835/2
+           crease_start_y <- 2.44/2
+           # inner crease lines begin 122cm from goal line
+           # extend 13m into crease
+           crease_small_start <- 1.22
+           crease_small_length <- 0.13
+           
+           ## face-off circle dots and lines
+           # dot locations: 6m from goal line, 7m in each y direction
+           x_dot_dist <- 6
+           y_faceoff_dot <- 7
+           # face-off circle radius 4.5m
+           r_faceoff <- 4.5
+           # hash marks 60cm long, 170cm apart
+           hash_length <- 0.6
+           hash_space <- 1.7
+           # circle inner lines:
+           # x-direction: lines 120cm apart, start 60cm from dot
+           # y-direction: lines 45cm apart, so start 22.5cm from dot
+           inner_start_x <- 0.6
+           inner_start_y <- 0.225
+           # lines parallel to side boards: 120cm long
+           par_side_length <- 1.2
+           # lines parallel to end boards: 90cm long
+           par_end_length <- 0.9
+           
+           ## other parameters
+           # neutral zone dots are 1.5m from blue line
+           x_dot_neutral <- 1.5
+           # ref circle 3m radius
+           r_ref <- 3
+         }
+  )
+  
+  ## corners
+  curve_angle <- seq(pi/2, 0, length = nsteps)
+  curve_angle_last <- curve_angle[nsteps]
+  # y coord at end of curve to connect ends
+  y_curve_end <- (y_max - r_corner) + r_corner*sin(curve_angle_last)
+  # for goal line, find y coord when x is at goal line
+  goal_angle <- acos(
+    (x_goal - (x_max - r_corner))/r_corner
+  )
+  y_goal <- (y_max - r_corner) + r_corner*sin(goal_angle)
+  
+  ## crease
+  crease_angles <- seq(
+    pi - acos(crease_end/r_crease),
+    pi + acos(crease_end/r_crease),
+    length = nsteps
+  )
+  
+  ## face-off circle
+  x_faceoff_dot <- x_goal - x_dot_dist
+  # find y coord on circle where hashes begin
+  y_hash <- r_faceoff*sin(
+    acos((hash_space/2)/r_faceoff)
+  )
+  
+  ### create list of components to pass to ggplot
+  list(
+    theme_minimal(),
+    theme(panel.grid = element_blank()),
+    ### blue line
+    annotate(
+      "segment",
+      x = x_blue*side, y = y_max,
+      xend = x_blue*side, yend = y_min,
+      color = "blue", size = 2
+    ),
+    ### ref crease
+    annotate(
+      "path",
+      x = r_ref*cos(seq(pi/2, 0, length = nsteps))*side,
+      y = y_min + r_ref*sin(seq(pi/2, 0, length = nsteps)),
+      color = "red"
+    ),
+    ### face-off circle, center ice
+    annotate(
+      "path",
+      x = r_faceoff*cos(seq(pi/2, -pi/2, length = nsteps))*side,
+      y = r_faceoff*sin(seq(pi/2, -pi/2, length = nsteps)),
+      color = "blue"
+    ),
+    ### center line:
+    annotate(
+      "segment",
+      x = 0, y = y_max,
+      xend = 0, yend = y_min,
+      color = "red", size = 2
+    ),
+    switch(specs,
+           "nhl" = annotate(
+             # dashed white lines atop center line (NHL only)
+             "segment",
+             x = 0, y = y_max,
+             xend = 0, yend = y_min,
+             color = "white", size = 0.5, linetype = "dashed"
+           ),
+           "iihf" = annotate(
+             # 50cm space between lines around center dot
+             "segment",
+             x = 0, y = 0.5,
+             xend = 0, yend = -0.5,
+             color = "white", size = 2.5
+           )
+    ),
+    ### face-off dot, center ice
+    annotate(
+      "point",
+      x = 0,
+      y = 0,
+      color = "blue", size = 1
+    ),
+    ### neutral zone dots
+    annotate(
+      "point",
+      x = (x_blue - x_dot_neutral)*side,
+      y = y_faceoff_dot*c(1, -1),
+      color = "red", size = 1
+    ),
+    ### side boards
+    annotate(
+      "segment",
+      x = 0, y = c(y_min, y_max),
+      # stop where corner curve begins
+      xend = (x_max - r_corner)*side, yend = c(y_min, y_max),
+      size = 1
+    ),
+    ### ends
+    # goal line
+    annotate(
+      "segment",
+      x = x_goal*side, y = y_goal,
+      xend = x_goal*side, yend = -y_goal,
+      color = "red"
+    ),
+    # connect ends
+    annotate(
+      "segment",
+      x = x_max*side, y = y_curve_end,
+      xend = x_max*side, yend = -y_curve_end,
+      size = 1
+    ),
+    # corners rounded in arc of circle
+    # starting point: (x_max, y_max) - r_circle from pi/2 to 0
+    annotate(
+      "path",
+      x = ((x_max - r_corner) + r_corner*cos(curve_angle))*side,
+      y = (y_max - r_corner) + r_corner*sin(curve_angle),
+      size = 1
+    ),
+    annotate(
+      "path",
+      x = ((x_max - r_corner) + r_corner*cos(curve_angle))*side,
+      y = -((y_max - r_corner) + r_corner*sin(curve_angle)),
+      size = 1
+    ),
+    ### crease
+    annotate(
+      "segment",
+      x = x_goal*side,
+      y = crease_start_y*c(-1, 1),
+      xend = (x_goal - crease_end)*side,
+      yend = crease_start_y*c(-1, 1),
+      col = "red"
+    ),
+    # crease lines
+    annotate(
+      "segment",
+      x = (x_goal - crease_small_start)*side,
+      y = crease_start_y*c(-1, 1),
+      xend = (x_goal - crease_small_start)*side,
+      yend = (crease_start_y - crease_small_length)*c(-1, 1),
+      col = "red"
+    ),
+    # semi-circle starting 137cm out with 183cm radius from center of goal line
+    annotate(
+      "path",
+      x = (x_goal + r_crease*cos(crease_angles))*side,
+      y = r_crease*sin(crease_angles),
+      col = "red"
+    ),
+    if (specs == "nhl") {
+      ### restricted area (NHL only)
+      annotate(
+        "segment",
+        x = x_goal*side, y = y_traps_start*c(-1, 1),
+        xend = x_max*side, yend = y_traps_end*c(-1, 1),
+        color = "red"
+      )
+    },
+    ### net
+    annotate(
+      "segment",
+      x = x_goal*side,
+      y = goal_post_start*c(-1, 1),
+      xend = (x_goal + net_depth)*side,
+      yend = goal_post_start*c(-1, 1)
+    ),
+    annotate(
+      "segment",
+      x = (x_goal + net_depth)*side,
+      y = -goal_post_start,
+      xend = (x_goal + net_depth)*side,
+      yend = goal_post_start
+    ),
+    ### face-off circles
+    # dot
+    annotate(
+      "point",
+      x = x_faceoff_dot*side,
+      y = y_faceoff_dot*c(1, -1),
+      col = "red",
+      size = 1
+    ),
+    # circles 
+    annotate(
+      # top
+      "path",
+      x = side*(x_faceoff_dot + r_faceoff*cos(circle)),
+      y = y_faceoff_dot + r_faceoff*sin(circle),
+      col = "red"
+    ),
+    annotate(
+      # bottom
+      "path",
+      x = side*(x_faceoff_dot + r_faceoff*cos(circle)),
+      y = -(y_faceoff_dot + r_faceoff*sin(circle)),
+      col = "red"
+    ),
+    # hashes
+    annotate(
+      "segment",
+      x = side*(
+        x_faceoff_dot + (hash_space/2)*rep(c(1, -1), each = 4)
+      ),
+      y = (y_faceoff_dot + y_hash*c(1, -1))*rep(c(1, 1, -1, -1), times = 2),
+      xend = side*(
+        x_faceoff_dot + (hash_space/2)*rep(c(1, -1), each = 4)
+      ),
+      yend = (y_faceoff_dot + (y_hash + hash_length)*c(1, -1))*
+        rep(c(1, 1, -1, -1), times = 2),
+      col = "red"
+    ),
+    ## inner lines
+    # parallel to side boards
+    annotate(
+      # parallel to side boards
+      "segment",
+      x = side*(
+        x_faceoff_dot + inner_start_x*rep(c(1, -1), each = 4)
+      ),
+      y = (y_faceoff_dot + inner_start_y*c(1, -1))*
+        rep(c(1, 1, -1, -1), times = 2),
+      xend = side*(
+        x_faceoff_dot + (inner_start_x + par_side_length)*
+          rep(c(1, -1), each = 4)
+      ),
+      yend = (y_faceoff_dot + inner_start_y*c(1, -1))*
+        rep(c(1, 1, -1, -1), times = 2),
+      col = "red"
+    ),
+    annotate(
+      # parallel to end boards
+      "segment",
+      x = side*(
+        x_faceoff_dot + inner_start_x*rep(c(1, -1), each = 4)
+      ),
+      y = (y_faceoff_dot + inner_start_y*c(1, -1))*
+        rep(c(1, 1, -1, -1), times = 2),
+      xend = side*(
+        x_faceoff_dot + inner_start_x*rep(c(1, -1), each = 4)
+      ),
+      yend = (y_faceoff_dot + (inner_start_y + par_end_length)*c(1, -1))*
+        rep(c(1, 1, -1, -1), times = 2),
+      col = "red"
+    )
+  )
+}
+```
+
+## Abstract
+
+Sportlogiq data can tell us which defensemen play most aggressively (pinch) in the offensive zone. I hypothesize that the defensemen who pinch most frequently have a positive impact on 5v5 offensive shot rates, outweighing the risk of an odd-man rush or zone exit. 
+
+To quantify aggressiveness, I include all passes, receptions, shots, loose puck recoveries, and puck protections by defensemen in the offensive zone. I define a pinch as any defenseman's play that goes closer to the net than the faceoff circles.
+
+```{r x50,  echo = FALSE, fig.align = 'center'}
+ ggplot() + geom_vline(xintercept = 54) + gg_rink()
+```
+
+My idea is inspired from watching Dan Boyle play behind the net while in the offensive zone with the Tampa Bay Lightning and New York Rangers.
+
+## Visualizing Offensive Aggressiveness by Defensemen
+
+To evaluate offensive aggressiveness by defensemen, I define 3 metrics using the aforementioned offensive zone events:
+
+  1. Individual Usage - Percentage of all O-Zone events attributed to one player
+  2. Individual Pinch Contributions - Of all of his team's on-ice O-Zone plays above the circles, what percentage of them are by him?
+  3. Individual Pinch Percentage- Percentage of a defenseman's offensive zone events that are a pinch
+
+I investigate the aggressiveness of Mitchell Vande Sompel, an offensive defenseman. By my new metrics, Vande Sompel is the primary player on 14% of Bridgeport's offensive zone events when on ice, 8% of Bridgeport's plays in the pinch area, and 35% of Vande Sompel's offensive zone events are a pinch. 
+
+Below are offensive zone event contours for Bridgeport's defensemen with 20 games played. All defensemen have a lot of plays at the points, but Vande Sompel's plot stands out in his pinching all over the offensive zone.
+
+```{r bridgeport contours, echo = FALSE, message=FALSE, fig.align = 'center'}
+plot_defensive_unit_ozone_contours("BRI")
+```
+
+Conversely, Dallas Eakins' San Diego Gulls do not have any defenders that pinch as frequently as  Sebastian Aho (defenseman) or Mitchell Vande Sompel.
+
+```{r sd contours, echo = FALSE, message=FALSE, fig.align = 'center'}
+plot_defensive_unit_ozone_contours("SD", 15)
+```
+
+Looking at Vande Sompel's offensive zone events, a good portion of his pinches are shots inside the circles, with some passes, loose puck recoveries, and receptions along the wall. At a glance, he is mostly succesful on his offensive zone passes. 
+
+```{r vandesompel ozone, echo = FALSE, message = FALSE, fig.align = 'center'}
+plot_player_events_by_type("Mitchell Vande Sompel")
+```
+
+For comparative purposes, we can look at Vande Sompel against the AHL's most frequent pincher, Reece Willcox (Lehigh Valley Phantoms), and  least frequent pincher, Sergei Boikov (Colorado Eagles). Willcox pinches heavily favoring his right-handedness to the right of the faceoff dot, with a lot of action behind the net, but Vande Sompel has a higher frequency of events in between the dots. What you can tell from a glance is that there are a lot of X's towards the slots, alluding to the difficulty of making plays in the slots. Reece Willcox also has a noticeable amount of green X's representing failed passes, so I will investigate his passing ability to see if he is hurting his team.
+
+```{r mvs best worst, echo = FALSE, message = FALSE, fig.align = 'center'}
+tmp %>%
+  filter(name %in% c("pass", "reception", "shot", "lpr", "puckprotection", "block"),
+         skatersonicesituation == "5v5",
+         playzone == "oz",
+         player %in% c("Sergei Boikov", "Reece Willcox", "Mitchell Vande Sompel")) %>%
+  ggplot(aes(x = xadjcoord, y = yadjcoord, color = name, shape = outcome)) +
+  geom_point() +
+  gg_rink() +
+  geom_vline(xintercept = 54) +
+  scale_shape_manual(values=c(4, 20)) +
+  coord_flip() + 
+  facet_wrap(~player) +
+  labs(title = "Offensive Zone Play Comparison")
+```
+
+Here are the top 10 players in terms of Pinch Percentage in the AHL:
+
+```{r top 10 ipinch, echo = FALSE, message = FALSE}
+on_ice_events <-
+  tmp %>%
+  filter(playzone == "oz",
+         skatersonicesituation == "5v5",
+         name %in% c("pass", "reception", "shot", "lpr", "puckprotection", "block")) %>%
+  select(playid, teamid, name, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, xadjcoord) %>%
+  gather(key = "key", value = "playerid", -playid, -name, -teamid, -xadjcoord) %>%
+  group_by(playerid, teamid) %>%
+  summarise(on_ice_oz_plays = n_distinct(playid),
+            on_ice_oz_plays_pinch_area = n_distinct(playid[xadjcoord > 54])) %>%
+  ungroup() %>%
+  mutate(playerid = as.numeric(playerid)) 
+
+individual_events <- 
+  tmp %>%
+  filter_sample() %>%
+  group_by(playerid, teamid) %>%
+  summarise(iEvents = n_distinct(playid), 
+            iEventsPinch = n_distinct(playid[xadjcoord > 54]))
+
+pinches <- on_ice_events %>%
+  inner_join(individual_events) %>%
+  inner_join(player_info) %>%
+  inner_join(team_info) %>%
+  select(playerid, teamshorthand, player_name, primaryPosition, starts_with("on_ice"), starts_with("i")) %>%
+  mutate(iEventPct = iEvents/on_ice_oz_plays,
+         iTeamPinchContributions = iEventsPinch/on_ice_oz_plays_pinch_area,
+         iPinchPct = iEventsPinch/iEvents) %>%
+  arrange(desc(iPinchPct)) %>%
+  filter(primaryPosition == "D",
+         iEvents > 300,
+         player_name != "Joey Laleggia")
+
+pinches %>%
+  select(player_name, teamshorthand, iEventsPinch, iEvents, iPinchPct) %>%
+  arrange(desc(iPinchPct)) %>%
+  mutate(iPinchPct = percent(iPinchPct)) %>%
+  rename(Player = player_name,
+         Team = teamshorthand) %>%
+  head(10) %>%
+  kable(align=rep('c', 5)) %>%
+  kable_styling(bootstrap_options = "striped", full_width = F)
+```
+
+And 10 least frequent: 
+
+```{r bottom 10 ipinch, echo = FALSE, message = FALSE}
+pinches %>%
+  select(player_name, teamshorthand, iEventsPinch, iEvents, iPinchPct) %>%
+  arrange(iPinchPct) %>%
+  mutate(iPinchPct = percent(iPinchPct)) %>%
+  rename(Player = player_name,
+         Team = teamshorthand) %>%
+  head(10) %>%
+  kable(align=rep('c', 5)) %>%
+  kable_styling(bootstrap_options = "striped", full_width = F)
+```
+
+To see if this is randomness, I look at the cumulative frequency by offensive zone event, and it does appear that the metric does start to stabilize after some time. With more than half a season of data, it may appear more reliable. 
+
+```{r stabilization, echo = FALSE, fig.align = 'center'}
+cum <- tmp %>%
+  filter(player %in% c("Mitchell Vande Sompel", "Reece Willcox", 
+                       "Sergei Boikov", "William Borgen"),
+         skatersonicesituation == "5v5",
+         playzone == "oz",
+         name %in% c("pass", "reception", "shot", "lpr", "puckprotection", "block")) %>%
+  group_by(player) %>%
+  mutate(pinch = ifelse(xadjcoord > 54, 1, 0), 
+         n = 1:n(),
+         cumfreq = cumsum(pinch)/n) %>%
+  select(player, pinch, n, cumfreq)
+
+ggplot(cum, aes(x = n, y = cumfreq, color = player)) +
+  geom_line() +
+  scale_y_continuous(labels = scales::percent) +
+  labs(x = "Offensive Zone Events", y = "Cumulative Frequency",
+       title = "iPinchPct Stabilization by nth Offensive Zone Event")
+  
+```
+
+## Relationship Between Pinch Metrics and Possession Metrics
+
+I look at the aforementioned pinching metrics at the individual and team levels to see if aggressiveness is correlated with expected goals or possession metrics. Corsi and Fenwick are adjusted for score, zone, and venue using Corsica-Hockey's calculations. At the player level, individual offensive zone usage has the strongest relationship between CF%, FF%, and xGF%, also containing a negative correlation with CA60 and xGA60. However, Pinch % and Pinch Contribution % have no correlation with most shot metrics. I expected the correlations to be small, as pinches make up only 6% of all offensive zone events and and 10% of events below the faceoff circles. 
+
+```{r possession player, echo = FALSE, message = FALSE, fig.align = 'center'}
+################ Calculate score and time since faceoff occurred for each event during game
+
+score_start <-
+  tmp %>%
+  group_by(gameid) %>%
+  summarise(playid = min(playid)) %>%
+  mutate(home_score = 0, 
+         away_score = 0)
+
+score_goals <-
+  tmp %>%
+  filter(name == "goal") %>%
+  inner_join(game_info) %>%
+  select(gameid, playid, name, teamid, gametime, awayTeamId, homeTeamId) %>%
+  mutate(home_goal = ifelse(teamid == homeTeamId, 1, 0),
+         away_goal = ifelse(teamid == awayTeamId, 1, 0)) %>%
+  group_by(gameid, home_goal) %>%
+  mutate(hometeamgoal = 1:n()) %>%
+  ungroup() %>%
+  group_by(gameid) %>%
+  mutate(home_score = cumsum(home_goal),
+         away_score = cumsum(away_goal)) %>%
+  select(gameid, playid, home_score, away_score)
+
+goals <- bind_rows(score_start, score_goals) %>%
+  arrange(gameid, playid) %>%
+  mutate(home_lead = home_score - away_score) 
+
+
+faceoffs <- tmp %>%
+  filter(teamid == homeTeamId) %>%
+  select(gameid, playid, gametime, playzone) %>%
+  rename(last_faceoff = gametime,
+         homeZone = playzone)
+
+############## Use Corsica's Score adjustments 
+
+adjustment <-
+  tmp %>%
+  left_join(goals) %>%
+  fill(home_score, away_score, home_lead) %>%
+  left_join(faceoffs) %>%
+  fill(last_faceoff, homeZone) %>%
+  mutate(under20 = ifelse(gametime - last_faceoff <= 20, 1, 0),
+         homeLead = ifelse(home_lead < -3, -3,
+                           ifelse(home_lead > 3, 3, home_lead))) %>%
+  filter(name == "shot", 
+         skatersonicesituation == "5v5") %>%
+  select(playid, gameid, teamid, player,homeTeamId, awayTeamId, gametime,
+         homeLead, homeZone, under20, name, type, outcome, expectedgoals, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12)
+
+adjusted_corsi <-
+  adjustment %>%
+  inner_join(scoreadj) %>%
+  mutate(corsi = ifelse(teamid == homeTeamId, hC, aC),
+         fenwick = ifelse(teamid == homeTeamId & outcome == "successful", hF,
+                          ifelse(teamid == awayTeamId & outcome == "successful", aF, 0)),
+         expectedgoals = ifelse(is.na(expectedgoals), 0, expectedgoals)) %>%
+  select(playid, gameid, teamid, homeTeamId, awayTeamId,
+         homeZone, under20, homeLead, corsi, fenwick, expectedgoals,
+         p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12) 
+
+
+########## Calculate On-Ice stats and TOI at player level
+corsis <- adjusted_corsi %>%
+  select(starts_with("p"), gameid, teamid,  corsi, fenwick, expectedgoals) %>%
+  gather('key','playerid', -playid, -gameid, -teamid, -corsi, -fenwick, -expectedgoals) %>%
+  mutate(playerid = as.integer(playerid)) %>%
+  inner_join(rosters, by = c("gameid", "playerid")) %>%
+  inner_join(team_info, by = c("teamid.y" = "teamid")) %>%
+  filter(primaryposition != "G") %>% 
+  mutate(shot_for = ifelse(teamid.x == teamid.y, 1, 0)) %>%
+  group_by(playerid, player, teamshorthand) %>%
+  summarise(CF = sum(corsi[shot_for == 1], na.rm = TRUE),
+            CA = sum(corsi[shot_for == 0], na.rm = TRUE),
+            CFpct = CF / (CF + CA),
+            FF = sum(fenwick[shot_for == 1], na.rm = TRUE),
+            FA = sum(fenwick[shot_for == 0], na.rm = TRUE),
+            FFpct = FF / (FF + FA),
+            xGF = sum(expectedgoals[shot_for == 1], na.rm = TRUE),
+            xGA = sum(expectedgoals[shot_for == 0], na.rm = TRUE),
+            xGFpct = xGF / (xGF + xGA)) %>%
+  arrange(desc(CFpct))
+
+
+toi_5v5 <- tmp %>%
+  select(gameid, playid, play_duration, skatersonicesituation, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12) %>%
+  gather('key', 'playerid', -gameid, -playid, -play_duration, -skatersonicesituation) %>%
+  mutate(playerid = as.integer(playerid)) %>%
+  inner_join(rosters, by = c("gameid", "playerid")) %>%
+  inner_join(team_info) %>%
+  filter(position == "D",
+         skatersonicesituation == "5v5") %>%
+  group_by(playerid, player, teamshorthand) %>%
+  summarise(toi = sum(play_duration)/60)
+
+
+############################# Calculate Pinching Stats
+on_ice_events <-
+  tmp %>%
+  filter(playzone == "oz",
+         skatersonicesituation == "5v5",
+         name %in% c("pass", "reception", "shot", "lpr", "puckprotection", "block")) %>%
+  select(playid, teamid, name, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, xadjcoord) %>%
+  gather(key = "key", value = "playerid", -playid, -name, -teamid, -xadjcoord) %>%
+  group_by(playerid, teamid) %>%
+  summarise(on_ice_oz_plays = n_distinct(playid),
+            on_ice_oz_plays_pinch_area = n_distinct(playid[xadjcoord > 54])) %>%
+  ungroup() %>%
+  mutate(playerid = as.numeric(playerid)) 
+
+individual_events <- 
+  tmp %>%
+  filter_sample() %>%
+  group_by(playerid, teamid) %>%
+  summarise(iEvents = n_distinct(playid), 
+            iEventsPinch = n_distinct(playid[xadjcoord > 54]))
+
+pinches <- on_ice_events %>%
+  inner_join(individual_events) %>%
+  inner_join(player_info) %>%
+  inner_join(team_info) %>%
+  select(playerid, teamid, teamshorthand, player_name, primaryPosition, starts_with("on_ice"), starts_with("i")) %>%
+  mutate(iEventPct = iEvents/on_ice_oz_plays,
+         iTeamPinchContributions = iEventsPinch/on_ice_oz_plays_pinch_area,
+         iPinchPct = iEventsPinch/iEvents) %>%
+  arrange(desc(iPinchPct)) %>%
+  filter(primaryPosition == "D",
+         player_name != "Joey Laleggia") %>%
+  inner_join(toi_5v5)
+
+################## Summarise pinching and possession at player level for analysis
+
+player_possession <- pinches %>%
+  inner_join(corsis, by = c("player_name" = "player",
+                            "teamshorthand" = "teamshorthand")) %>%
+  filter(toi > 300) %>%
+  mutate(xGF60 = xGF / toi * 60,
+         xGA60 = xGA / toi * 60,
+         CF60 = CF / toi * 60,
+         CA60 = CA / toi * 60,
+         FF60 = FF / toi * 60,
+         FA60 = FA / toi * 60)
+
+tendencies <-
+  tmp %>%
+  filter(playzone == "oz",
+         position == "D",
+         name %in% c("pass", "shot", "lpr", "block", "puckprotection", "reception"),
+         skatersonicesituation == "5v5") %>%
+  group_by(player, teamshorthand) %>%
+  summarise(passes = n_distinct(playid[name == "pass"]),
+            shots = n_distinct(playid[name == "shot"]),
+            shot_happy = shots/n(),
+            pass_happy = passes/n()) %>%
+  filter(passes > 50) %>%
+  select(player, teamshorthand, shot_happy, pass_happy) %>% 
+  arrange(desc(shot_happy))
+  
+player_possession %>%
+  filter(toi > 300) %>%
+  select(iPinchPct, iEventPct, iTeamPinchContributions, CFpct, CF60, CA60, FFpct, xGFpct, xGF60, xGA60) %>%
+  cor() %>%
+  ggcorrplot(type = "lower", lab = TRUE) +
+  ggtitle("Player Pinching & Possession Correlations")
+
+```
+
+At the team level, I look to see if offensive zone usage of defensemen and percentage of plays below faceoff dots by defensemen have any relationship with possession metrics. The most notable result is a moderately-strong negative relationship between Pinch Contribution Percentage and xGF%. While this is interesting, correlation does not imply causation, so this raises the question if teams that pinch more frequently are using bad strategy, are having their defensemen compensate for a lack of forward talent, or if teams are strategically putting defensemen out of their comfort zone to grow at the AHL level. This is an area for future research.
+
+```{r team pinching, echo = FALSE, message = FALSE, fig.align = 'center'}
+
+team_corsi_for <- 
+  adjustment %>%
+  inner_join(scoreadj) %>%
+  mutate(corsi = ifelse(teamid == homeTeamId, hC, aC),
+         fenwick = ifelse(teamid == homeTeamId, hF, aF)) %>%
+  group_by(teamid) %>%
+  summarise(games = n_distinct(gameid),
+            xGF = sum(expectedgoals, na.rm = TRUE),
+            CF = sum(corsi, na.rm = TRUE),
+            FF = sum(fenwick, na.rm = TRUE))
+
+team_corsi_against <-
+  adjustment %>%
+  inner_join(scoreadj) %>%
+  mutate(corsi = ifelse(teamid == homeTeamId, hC, aC),
+         fenwick = ifelse(teamid == homeTeamId, hF, aF),
+         teamid = ifelse(teamid == homeTeamId, awayTeamId, homeTeamId)) %>%
+  group_by(teamid) %>%
+  summarise(xGA = sum(expectedgoals, na.rm = TRUE),
+            CA = sum(corsi, na.rm = TRUE),
+            FA = sum(fenwick, na.rm = TRUE))
+
+team_toi <-
+  tmp %>%
+  filter(skatersonicesituation == "5v5") %>%
+  select(homeTeamId, awayTeamId, play_duration) %>%
+  gather('hr','teamid', -play_duration) %>%
+  group_by(teamid) %>%
+  summarise(team_toi = sum(play_duration) / 60)
+
+team_corsis <- team_corsi_for %>%
+  inner_join(team_corsi_against) %>%
+  inner_join(team_toi) %>%
+  mutate(pace = (CF + CA) / (team_toi/60),
+         CFpct = CF / (CF + CA),
+         FFpct = FF / (FF + FA),
+         xGFpct = xGF / (xGF + xGA)) %>%
+  arrange(desc(pace)) %>%
+  inner_join(team_info) 
+
+team_pinches <- tmp %>%
+  filter(skatersonicesituation == "5v5",
+         playzone == "oz",
+         name %in% c("pass", "reception", "shot", "lpr", "puckprotection", "block")) %>%
+  group_by(teamid) %>%
+  summarise(n = n_distinct(playid), 
+            PinchContributions = sum(pinch)/ n_distinct(playid[xadjcoord > 54]),
+            UsageDef = n_distinct(playid[primaryposition == "D"]) / n) 
+  
+
+team_summary <- team_corsis %>%
+  inner_join(team_pinches) %>%
+  select(teamshorthand, teamid, PinchContributions, UsageDef, xGFpct, xGFpct, FFpct, CFpct, pace)
+  
+team_colors <- team_info %>%
+  bind_cols(team_colors) %>%
+  select(teamid, teamshorthand, primary, secondary)
+
+team_summary %>% 
+  inner_join(team_colors) %>%
+  ggplot(aes(x = PinchContributions, y = xGFpct, fill = primary, color = secondary, label = teamshorthand)) +
+  geom_point(shape = 21, size = 10) +
+  scale_fill_identity() +
+  scale_color_identity() +
+  geom_text(size = 3.5) + 
+  geom_abline(slope = -1.1713, intercept = 0.6242) +
+  scale_x_continuous(labels = percent) +
+  scale_y_continuous(labels = percent) + 
+  labs(x = "Percentage of Plays Below Circles by Defensemen", y = "xGF%",
+       title = "Relationship Between Team Pinching and Expected Goals") 
+```
+
+## Clustering Offensive Zone Styles
+
+```{r clustering data load, echo = FALSE, message = FALSE, warning = FALSE}
+
+########## How do defensemen of different styles play differently when leading/trailing?
+
+# Cluster Usage, Pinch Pct, Shot Happiness, Pass Happiness
+
+dmen_pre_cluster <- 
+  player_possession %>% 
+  inner_join(tendencies) 
+
+dmen_to_cluster <- 
+  player_possession %>% 
+  inner_join(tendencies) %>%
+  select(iEventPct, iTeamPinchContributions, iPinchPct, shot_happy, pass_happy) 
+
+# Use map_dbl to run many models with varying value of k (centers)
+tot_withinss <- map_dbl(1:10,  function(k){
+  model <- kmeans(x = dmen_to_cluster, centers = k)
+  model$tot.withinss
+})
+
+# Generate a data frame containing both k and tot_withinss
+elbow_df <- data.frame(
+  k = 1:10,
+  tot_withinss = tot_withinss
+)
+
+# Plot the elbow plot
+elbow_plot <- ggplot(elbow_df, aes(x = k, y = tot_withinss)) +
+  geom_line() +
+  scale_x_continuous(breaks = 1:10)
+
+library(cluster)
+
+set.seed(1234)
+model <- kmeans(dmen_to_cluster, centers = 4)
+dmen_pre_cluster <-  mutate(dmen_pre_cluster, cluster = model$cluster)
+
+cluster_means <- dmen_pre_cluster %>% 
+  select(-contains("player"), -teamid, -teamshorthand, -primaryPosition) %>%
+  group_by(cluster) %>% 
+  summarise_all(funs(mean(.)))
+
+
+cluster_medians <- dmen_pre_cluster %>% 
+  select(-contains("player"), -teamid, -teamshorthand, -primaryPosition) %>%
+  group_by(cluster) %>% 
+  summarise_all(funs(median(.)))
+
+
+cluster_counts <- dmen_pre_cluster %>% group_by(cluster) %>% summarise(n = n()) 
+
+cluster_summary <- cluster_counts %>% inner_join(cluster_medians) %>% 
+  mutate(cluster_name = case_when(
+    cluster == 1 ~ "Heavy Pinchers",
+    cluster == 2 ~ "Puck Movers",
+    cluster == 3 ~ "Low Usage Point Defensemen",
+    cluster == 4 ~ "Shot-Happy Defensemen"
+  ))
+
+cluster_names <- cluster_summary %>% select(cluster, cluster_name)
+
+dmen_clusters <- 
+  dmen_pre_cluster %>%
+  left_join(cluster_names)
+
+```
+
+To compare defensive aggressiveness, I cluster defensemen based on Usage, Pinch Contribution %, Pinch %, Shots Per O-Zone Touch (Shot Happiness), and Passes Per O-Zone Touch (Pass Happiness). Using K-Means on the 174 defensemen with over 300 minutes, I find 4 clusters of defensemen. 
+
+```{r cluster results, echo = FALSE, message = FALSE}
+cluster_means_clean <-
+  cluster_means %>% 
+  left_join(cluster_names) %>%
+  left_join(cluster_counts) %>%
+  mutate(Cluster = cluster_name,
+         `Usage` = percent(iEventPct),
+         `Pinch Cont %` = percent(iTeamPinchContributions),
+         `Pinch %` = percent(iPinchPct),
+         `Shot Frequency` = percent(shot_happy),
+         `Pass Frequency` = percent(pass_happy),
+         CF60 = round(CF60, 2),
+         CA60 = round(CA60, 2),
+         `CF%` = percent(CFpct),
+         xGF60 = round(xGF60, 2),
+         xGA60 = round(xGA60, 2),
+         `xGF%` = percent(xGFpct)
+         )
+
+cluster_means_clean %>%
+  select(Cluster, n, Usage, `Pinch Cont %`, `Pinch %`, `Shot Frequency`, `Pass Frequency`) %>%
+  kable(align=rep('c', 7)) %>%
+  kable_styling(bootstrap_options = "striped", full_width = F)
+
+```
+
+Heavy Pinchers are characterized by their high pinch contributions and percentage, and since they touch the puck so much they have a relatively low frequency. The Puck Movers group have similar shot and pass frequency overall to the Heavy Pinchers, but they generally stick closer to the blue line. Low Usage Point defensemen never really pinch, and their shot-happiness looks very high due to the overall low usage. Shot-Happy defensemen make up the largest quantity of defenders, as they shoot the puck frequently, have pinch and usage rates that are relatively high. 
+
+When looking at the possession and expected goals stats of these clusters, Shot-Happy defensemen have the highest overall Corsi-For Percentage, driven by a high Corsi-For Per 60, with the other clusters being very similar. Puck movers don't have the best CF%, but they have a higher Expected Goals Per 60 than all of ther groups. The Heavy Pinchers group does have the highest XGA60 and the second highest CA60 of the group. This goes against my hypothesis that heavy pinchers outweigh the risks of chances the other way.
+
+```{r cluster possession, echo = FALSE, message = FALSE}
+cluster_means_clean %>%
+  select(Cluster, n, `Pinch %`, xGF60, xGA60, `xGF%`, CF60, CA60, `CF%`) %>%
+  kable(align=rep('c', 9)) %>%
+  kable_styling(bootstrap_options = "striped", full_width = F)
+```
+
+While those are only averages, there are players who perform well and poorly in all 4 clusters. The following table has all 174 players with their clusters, pinch, possession, and expected goals statistics. You can filter the below table by cluster and sort by individual stats. 
+
+<div align="center">
+```{r cluster player compare, echo = FALSE, message = FALSE, warning = FALSE}
+dmen_clusters %>% 
+  arrange(desc(xGFpct)) %>%
+  mutate(`Player` = player_name,
+         `Team` = teamshorthand,
+         `Cluster` = cluster_name,
+         `Pinch Contribution %` = percent(iTeamPinchContributions),
+         `Pinch %` = percent(iPinchPct),
+         `xGF%` = percent(xGFpct),
+         xGF60 = round(xGF60, 2),
+         xGA60 = round(xGA60, 2),
+         `CF%` = percent(CFpct),
+         CF60 = round(CF60, 2),
+         CA60 = round(CA60, 2),
+         `FF%` = percent(FFpct),
+         `Shot Freq` = percent(shot_happy),
+         `Pass Freq` = percent(pass_happy)) %>%
+  select(Player, Team, Cluster, `Pinch Contribution %`, `Pinch %`, `xGF%`, xGF60, xGA60, `CF%`, CF60, CA60, `FF%`, `Shot Freq`, `Pass Freq`) %>%
+  datatable(filter = 'top', options = list(pageLength = 5, clear = TRUE), rownames = FALSE)
+```
+</div>
+
+## Pinching while leading and trailing
+
+Defensemen stay back in the offensive zone with a lead, and play more aggressively while trailing. Players and coaches still embrace the shell with a lead, despite research dating back to at least 2014 that suggests the defensive shell increases goals against. I hope to visualize how this looks for defensemen pinching. The metric I use to measure this is Pinch Contribution Percentage, as I want to see if defensemen are making more of a team's plays in below the circles when trailing. 
+
+At the team level (two defensemen on the ice at a time), defensemen generally pinch more frequently in the second period, possibly as a result of the longer change. A team leading in the 3rd period has a defenseman involved in a play down low around 8% of the time, about 10% when tied, and 13% when leading, numbers that seem small but add up quickly in a game. I ignore 1st period 3+ goal leads, as they are very infrequent. 
+
+```{r scoredifferential table, echo = FALSE, message = FALSE}
+score_states <-
+  tmp %>% 
+  left_join(goals) %>%
+  fill(home_score, away_score, home_lead) %>%
+  left_join(faceoffs) %>%
+  fill(last_faceoff, homeZone) %>%
+  mutate(under20 = ifelse(gametime - last_faceoff <= 20, 1, 0),
+         homeLead = ifelse(home_lead < -3, -3,
+                           ifelse(home_lead > 3, 3, home_lead)),
+         `score_diff` = ifelse(teamid == homeTeamId, homeLead, homeLead * -1)) %>%
+  filter(playzone == "oz",
+         skatersonicesituation == "5v5",
+         name %in% c("pass", "reception", "shot", "lpr", "puckprotection", "block")) 
+
+
+score_states_tmp <- score_states %>% select(playid, score_diff)
+# Pinch Percentage of Plays 
+
+score_states %>%
+  group_by(period, score_diff) %>%
+  summarise(pinch_rate = percent(sum(pinch)/n_distinct(playid[xadjcoord > 54])),
+            n = n()) %>% 
+  filter(n >= 5000) %>%
+  select(-n) %>%
+  spread(period, pinch_rate) %>%
+  arrange(desc(score_diff))  %>%
+  rename(
+    `1st Period` = `1`,
+    `2nd Period` = `2`,
+    `3rd Period` = `3`,
+    `Score Diff` = score_diff
+  ) %>%
+  mutate(`Score Diff` = case_when(
+    `Score Diff` == 3 ~ "3+",
+    `Score Diff` == -3 ~ "-3+",
+    TRUE ~ as.character(`Score Diff`)),
+        `1st Period` = ifelse(is.na(`1st Period`), " ", `1st Period`)) %>%
+  kable(align=rep('c', 4)) %>%
+  kable_styling(bootstrap_options = "striped", full_width = F)
+```
+
+At the individual player level**, I look at how involved defensemen are based on the score differential and their aggressiveness cluster. When trailing, a Heavy Pincher is involved on 7.5% of touches, but cut it back about 2% when up by more than 1 goal. Puck Movers do pinch more when up than when the game is tied, which is an interesting result. Shot-Happy defensemen essentially lower their aggressiveness at a negative linear pace. Low Usage Point Defensemen do see an uptick in activity when trailing, and pinch below 3% of the time when leading by 1. 
+
+```{r pinch contribution, echo = FALSE, message = FALSE, fig.align = 'center'}
+player_clusters <- dmen_pre_cluster %>% left_join(cluster_names) %>% select(playerid.x, cluster_name) %>%
+  rename(playerid = playerid.x)
+
+############ INDIVIDUAL CLUSTER PINCHING BY SCORE
+
+############################# Calculate Pinching Stats
+on_ice_period <-
+  score_states %>% 
+  select(playid, teamid, name, period, p1, p2, p3, p4, p5, p6, p7, p8, p9, p10, p11, p12, xadjcoord, score_diff) %>%
+  gather(key = "key", value = "playerid", -playid, -name, -teamid, -xadjcoord, -period, -score_diff) %>%
+  group_by(playerid, teamid, period, score_diff) %>%
+  summarise(on_ice_oz_plays = n_distinct(playid),
+            on_ice_oz_plays_pinch_area = n_distinct(playid[xadjcoord > 54])) %>%
+  ungroup() %>%
+  mutate(playerid = as.numeric(playerid)) %>%
+  left_join(player_clusters) 
+
+individual_period <- 
+  score_states %>%
+  group_by(playerid, teamid, period, score_diff) %>%
+  summarise(iEvents = n_distinct(playid), 
+            iEventsPinch = n_distinct(playid[xadjcoord > 54]))
+
+pinches_period <- on_ice_period %>%
+  inner_join(individual_period) %>%
+  inner_join(player_info) %>%
+  inner_join(team_info) %>%
+  select(playerid, teamid, teamshorthand, player_name, score_diff, period, cluster_name, primaryPosition, starts_with("on_ice"), starts_with("i")) %>%
+  filter(primaryPosition == "D",
+         player_name != "Joey Laleggia",
+         !is.na(cluster_name)) %>%
+  inner_join(toi_5v5) %>%
+  group_by(cluster_name, period, score_diff) %>%
+  summarise(iEventPct = sum(iEvents)/sum(on_ice_oz_plays),
+            iTeamPinchContributions = sum(iEventsPinch)/sum(on_ice_oz_plays_pinch_area),
+            iPinchPct = sum(iEventsPinch)/sum(iEvents))
+
+
+on_ice_period %>%
+  inner_join(individual_period) %>%
+  inner_join(player_info) %>%
+  inner_join(team_info) %>%
+  select(playerid, teamid, teamshorthand, player_name, score_diff, period, cluster_name, primaryPosition, starts_with("on_ice"), starts_with("i")) %>%
+  filter(primaryPosition == "D",
+         player_name != "Joey Laleggia",
+         !is.na(cluster_name)) %>%
+  inner_join(toi_5v5) %>%
+  group_by(cluster_name, score_diff) %>%
+  summarise(iEventPct = sum(iEvents)/sum(on_ice_oz_plays),
+            `Pinch Contribution %` = sum(iEventsPinch)/sum(on_ice_oz_plays_pinch_area),
+            iPinchPct = sum(iEventsPinch)/sum(iEvents),
+            plays = sum(on_ice_oz_plays)) %>%
+  mutate(`Score Differential` = score_diff,
+         Cluster = cluster_name) %>%
+  ggplot(aes(x = `Score Differential`, y = `Pinch Contribution %`, color = Cluster)) +
+  geom_point(aes(size = plays)) +
+  geom_smooth(se = FALSE) +
+  scale_x_continuous(breaks = c(-3, -2, -1, 0, 1, 2, 3)) +
+  scale_y_continuous(labels = percent) +
+  labs(title = "Pinch Contribution% Chart By Lead",
+       subtitle = "Pinch Contribution % is Individual Pinches / On Ice Plays Below Faceoff Circles")
+```
+
+** At the player level, only one defensemen is of concern at a time. Hence, the pinch rates appear lower. You cannot add the Pinch Contributions of two players to reach the numbers at the team level, since credit is given to both defenders in the team level metric. 
+
+## Evaluating the AHL's most active pinchers 
+
+I will compare Christian Wolanin, Mitchell Vande Sompel, Niko Mikkola, Matt Donovan, and Reece Willcox, five of the AHL's most active pinchers. I also include Joshua Mahura, who is a successful defenseman in the offensive zone, but is on a team that essentially never pinches. 
+
+Vande Sompel, Mahura, Donovan, and Wolanin all have similar shot assist percentages, while Mikkola and Willcox lag behind. Vande Sompel has the highest completion percentage, but Wolanin sacrifices some of his completions for passes that will lead to shots.
+
+```{r pinch passes, echo = FALSE}
+tmp %>%
+  filter(pinch == 1,
+         name == "pass",
+         player  %in% c("Christian Wolanin", "Mitchell Vande Sompel", "Reece Willcox", "Niko Mikkola",
+                        "Joshua Mahura", "Matt Donovan"),
+         type %in% c("eastwest","north","northoffboards","slot","south","southoffboards")) %>%
+  mutate(shotassist = ifelse(name_lead == "shot" | name_lead_2 == "shot" | name_lead_3 == "shot" |
+                               name_lead_4 == "shot" | name_lead_5 == "shot", 1, 0)) %>%
+  group_by(player) %>%
+  summarise(n = n(),
+            shotassists = sum(shotassist)/n,
+            success_rate = n_distinct(playid[outcome == "successful"])/n) %>%
+  group_by(player) %>%
+  arrange(desc(shotassists)) %>%
+  mutate(`Shot Assist %` = percent(shotassists),
+         `Pass Completion %` = percent(success_rate)) %>%
+  rename(Player = player) %>%
+  select(-shotassists, -success_rate) %>%
+  kable(align=rep('c', 4)) %>%
+  kable_styling(bootstrap_options = "striped", full_width = F)
+```
+
+I further breakdown passing by pass type, can be found in the appendix of this document. What separates Vande Sompel and Wolanin apart from the other heavy pinchers are their success rates on slot and east-west passes. Wolanin's most frequent pass-type is a slot pass, and succeeds 17% more than the average AHL defenseman. 
+
+Joshua Mahura, who belongs to the Puck Movers cluster, uses his infrequent pinches to make high-probability north and southbound passes. In the limited sample, his slot passes are usually unsuccessful and infrequently lead to shot assists, so I think this indicates that his selectiveness is his optimal. 
+
+Willcox clearly has the ability to get to the dirty areas, but is attempting aggressive plays that do not result in shots. While the sample size is not overwhelmingly definitive, the Phantoms should try to simplify his passing game. His over-aggressive style has his xGF60 in the bottom 10th percentile of AHL defensemen. Mitchell Vande Sompel's scouting report has always backed up the offensive play, and his passing success seems to explain why his xGF% is closer to 50% than his CF% and FF%. Niko Mikkola is a notch below Vande Sompel and Wolanin in terms of overall offensive skill, and it seems San Antonio uses him more aggressively to recover loose pucks and take assisted shots instead of pass aggressively and make plays. 
+
+Another component of pinching with a substantial sample in half-season of games is loose puck recoveries, as a player that leaves the point to recover a puck is creating more possessions for his team. Wolanin, Donovan, and Mahura are all opportunistic when recovering loose pucks, as they each create a shot on over 25% of their LPR attempts. Vande Sompel and Mikkola do not recover loose pucks at such a clip, resulting in only 17% and 19% LPR-to-Shot rates, respectively. Willcox's success rate is pretty high, but he doesn't create as many shots as Wolanin, Donovan, and Mahura. Overall, Willcox and Mikkola seem to be empty-calorie players when playing aggressively. 
+
+```{r lpr, echo = FALSE}
+
+tmp %>%
+  filter(pinch == 1,
+         name == "lpr",
+         player  %in% c("Christian Wolanin", "Mitchell Vande Sompel", "Reece Willcox", "Niko Mikkola",
+                        "Joshua Mahura", "Matt Donovan")) %>%
+  mutate(recovery_to_shot = ifelse(name_lead == "shot" | name_lead_2 == "shot" | name_lead_3 == "shot" |
+                               name_lead_4 == "shot" | name_lead_5 == "shot", 1, 0)) %>%
+  group_by(player) %>%
+  summarise(n = n(),
+            `LPR to Shot %` = percent(sum(recovery_to_shot)/n),
+            `LPR Success Rate` = percent(n_distinct(playid[outcome == "successful"])/n)) %>%
+  group_by(player) %>%
+  arrange(desc(n)) %>%
+  rename(Player = player)  %>%
+  kable(align=rep('c', 4)) %>%
+  kable_styling(bootstrap_options = "striped", full_width = F)
+```
+
+
+## Conclusion: Application to Hockey Operations
+
+This analysis gives a glimpse into a small percentage of plays at the AHL level. Overall, a pretty low percentage of plays in the offensive zone are made by defensemen, and even fewer are below the faceoff circles to get to high danger areas. There is not a positive relationship between an individual player's aggressiveness and possession metrics, exemplifying that pinching and offensive zone play is only a portion of a defenseman's responsibilities at even strength. At the team level, there is a negative relationship between pinching and xGF%, which led me to find that defensemen on the trailing team will increase their aggressiveness as a game goes on. 
+
+While I provide a framework for evaluating pinching, I must acknowledge that the very best offensive defensemen will usually be at the NHL level, as their skills are scarce and NHL coaches may be willing to deal with their defensive shortcomings. This heavily influences the sample of AHL players, and therefore similar types of analysis remain necessary to see if pinching is an effective strategy at the NHL level. 
+
+This framework can help optimize defensive players' usage in the offensive zone at even strength. The Belleville Senators can look at Christian Wolanin's skills and gameplan around his aggressiveness. The Lehigh Valley Phantoms can note that Reece Willcox does have a skill to get to dirty areas, however they may work to develop his decision making in tight areas and try to cut down on his dangerous passes. San Antonio can recognize that Niko Mikkola isn't contributing much to offense when he is pinching, so maybe pinching less wouldn't hurt his overall game. 
+
+Dallas Eakins' 2018-19 San Diego Gulls were a successful defensive unit at even strength, even with scarce usage of defensemen deep in the zone. I suggest an NHL staff can use Sportlogiq data to examine the 2019-20 offensive zone activity of Josh Manson, Cam Fowler, and Hampus Lindholm under Dallas Eakins' coaching schemes, and compare that to how they were used under Randy Carlyle and Bob Murray in 2018-19. 
+
+Knowing how frequently an opposing player pinches can help a coach plan in the defensive zone. A forward can attack the point aggressively when they see Andrej Suster with the puck, as he's probably not going to try to maneuver his way down low. A team can expect Reece Willcox to play aggressively up the boards, and they can prepare to poke check him and force dangerous passes, and maybe have a forward cheat the other way for an odd-man rush or breakaway. Christian Wolanin is not trigger-happy, so forcing him to take an outside shot instead of giving him a chance at a slot pass may put him in a difficult situation. John Gilmour is a shot-happy defenseman, but if his team is trailing by two, his pinching level will look more like that of a Heavy Pincher. 
+
+Ryan Stimson has written previously about positionless hockey, and I believe the AHL remains an opportunity for NHL teams to experiment with heavily aggressive defensive play, even with the most skilled defensemen likely having a role in the NHL already. I looked briefly into offensive styles mentioned in his article Tactalytics, and plotted teams that play a point-heavy strategy vs a behind-the-net strategy, and found that some teams with both styles do pinch frequently. A team that plays heavily behind the net like Syracuse can have defensemen pinch for one-timers and east-west passing, while Bridgeport's heavy point play means that a pinching defenseman may have to create on his own.
+
+```{r strategy, echo = FALSE, message = FALSE, fig.align = 'center'}
+passing_table <- tmp %>%
+  filter(playzone == "oz",
+         name == "pass",
+         !type %in% c("none","offboards")) %>%
+  group_by(teamshorthand, type) %>%
+  summarise(n = n()) %>%
+  group_by(teamshorthand) %>%
+  mutate(sum = sum(n),
+         freq = n/sum) %>%
+  select(-n, -sum) %>%
+  spread(type, freq) %>%
+  mutate(eastwest_pass = eastwest + eastwestoffboards,
+          north_pass = north + northoffboards,
+          rush_pass = rush + rushoffboards,
+          south_pass = south + southoffboards
+        ) %>%
+  select(teamshorthand, eastwest_pass, north_pass, rush_pass, south_pass) %>%
+  ungroup()
+
+team_summary <- team_corsis %>%
+  inner_join(team_pinches) %>%
+  select(teamshorthand, PinchContributions, UsageDef, pace)
+
+location_table <- tmp %>%
+  filter(playzone == "oz", 
+         xadjcoord >= 25,
+         !name %in% c("goal", "assist"),
+         playsection != "northWestBoardsNZ") %>%
+  mutate(playsection = case_when(
+    xadjcoord >= 90 & yadjcoord >= 0 ~ "behindNetLeft",
+    xadjcoord >= 90 & yadjcoord <= 0 ~ "behindNetRight",
+    TRUE ~ as.character(playsection))) %>%
+  group_by(teamshorthand, playsection) %>%
+  summarise(n = n()) %>%
+  group_by(teamshorthand) %>%
+  mutate(sum = sum(n),
+         freq = n/sum) %>% 
+  select(-n, -sum) %>%
+  spread(playsection, freq) %>%
+  mutate(point_play = centerPoint + eastPoint + westPoint,
+         slot_play = innerSlot + eastOuterSlot + westOuterSlot,
+         corners_play = outsideNorthEast + outsideNorthWest,
+         behindnet_play = behindNetLeft + behindNetRight) %>%
+  select(teamshorthand, point_play, slot_play, corners_play, behindnet_play) %>%
+  ungroup()
+
+
+team_colors <- team_info %>%
+  bind_cols(team_colors) %>%
+  select(teamid, teamshorthand, primary, secondary)
+
+
+library(ggrepel)
+location_table %>%
+  left_join(team_summary) %>%
+  left_join(team_info) %>%
+  left_join(team_colors) %>%
+  ggplot(aes(x = behindnet_play, y = point_play, size = PinchContributions, 
+             fill = primary, color = secondary)) + 
+  geom_point(shape = 21) +
+  ggrepel::geom_text_repel(aes(label = teamshorthand)) + 
+  scale_fill_identity() +
+  scale_color_identity() +
+  ggtitle("Evaluating Team Behind-the-Net and Point Pinching")
+```
+
+## Acknowledgements and future considerations
+
+The code that I used to draw the hockey rink was from statswithmatt.com's article "Plotting a hockey rink in R". The original article can be found at https://www.statswithmatt.com/post/hockey-rink-in-r/.
+
+It is very well possible that defensemen are used as forwards in certain game situations, and I did not 100% account for this outside of basic EDA. Joey Laleggia was the only labelled defenseman removed from analysis, as eliteprospects.com has him listed as a Left Winger. 
+
+Directional passing is a very big portion of evaluating passing down low. However, there is not a concrete way to define the target of an incomplete pass using Sportlogiq data. I believe that this information would provide great insight into interior passing if there was a methodology to estimate failed-pass intention.
+
+Looking into player handedness is an interesting extension of this research that may tell us more about defensemen. 
+
+## Appendix
+
+  1. Event Plots for Players Analyzed
+```{r player plots, echo = FALSE, message = FALSE, fig.align = 'center'}
+plot_player_events_by_type("Matt Donovan")
+plot_player_events_by_type("Joshua Mahura")
+plot_player_events_by_type("Christian Wolanin")
+plot_player_events_by_type("Reece Willcox")
+```
+
+  2. Player Shot Assist and Completion % Table by Pass Type
+
+```{r all passing, echo = FALSE, message = FALSE, fig.align = 'center'}
+
+tt <- tmp %>%
+  filter(pinch == 1,
+         name == "pass",
+         player  %in% c("Christian Wolanin", "Mitchell Vande Sompel", "Reece Willcox", "Niko Mikkola",
+                        "Joshua Mahura", "Matt Donovan"),
+         type %in% c("eastwest","north","northoffboards","slot","south","southoffboards")) %>%
+  mutate(shotassist = ifelse(name_lead == "shot" | name_lead_2 == "shot" | name_lead_3 == "shot" |
+                               name_lead_4 == "shot" | name_lead_5 == "shot", 1, 0)) %>%
+  group_by(player, type) %>%
+  summarise(n = n(),
+            `Shot Assist %` = percent(sum(shotassist)/n),
+            `Completion %` = percent(n_distinct(playid[outcome == "successful"])/n)) %>%
+  group_by(player) %>%
+  mutate(Frequency = percent(n/sum(n))) %>%
+  rename(Player = player,
+         PassType = type)
+
+
+leagueaverages <- tmp %>%
+  filter(pinch == 1,
+         name == "pass") %>%
+  group_by(type) %>%
+  mutate(shotassist = ifelse(name_lead == "shot" | name_lead_2 == "shot" | name_lead_3 == "shot" |
+                               name_lead_4 == "shot" | name_lead_5 == "shot", 1, 0)) %>%
+  group_by(type) %>%
+  summarise(n = n(),
+            `League Shot Assist %` = percent(sum(shotassist)/n),
+            `League Completion %` =  percent(n_distinct(playid[outcome == "successful"])/n)) %>%
+  mutate(`League Frequency` = percent(n/sum(n))) %>%
+  filter(n > 100) %>%
+  select(-n) %>%
+  rename(PassType = type)
+
+tt %>%
+  left_join(leagueaverages) %>%
+  arrange(PassType) %>%
+  kable(align=rep('c', 9)) %>%
+  kable_styling(bootstrap_options = "striped", full_width = F)
+```
+
+
+
