@@ -1,0 +1,310 @@
+---
+title: "Philadelphia Eagles Analytics Board"
+output:  
+  flexdashboard::flex_dashboard:
+    theme:
+      bg: "#000000 "
+      fg: "#A5ACAF" 
+      primary: "#004C54"      
+      base_font:
+        google: Prompt
+      code_font:
+        google: JetBrains Mono
+    orientation: rows
+    vertical_layout: fill
+    runtime: shiny
+---
+
+```{r libraries}
+
+# flexdashboard info can be found here:  https://pkgs.rstudio.com/flexdashboard/
+
+library(flexdashboard)
+library(shiny)
+library(shinyWidgets)
+library(tidyverse)
+library(lubridate)
+library(nflfastR)
+
+# nflfastR is a well documented and maintained package that can be found here:  https://www.nflfastr.com/
+
+# nflfastR is a part of nflverse (https://nflverse.nflverse.com/) which is a compilation of packages
+
+```
+
+
+Player Pages
+==============
+
+```{r sample data scrape}
+# Setup our team of interest
+teamTriCode = "PHI"
+
+# Pull the Eagles current playing roster
+phi_roster <- nflfastR::fast_scraper_roster() %>% dplyr::filter(team==teamTriCode)
+# Pull NFL Team List
+nfl_teams <- nflfastR::teams_colors_logos
+
+# Get data dictionary
+data_dict <- nflfastR::field_descriptions
+
+```
+
+
+Input {.sidebar}
+--------------------
+
+```{r eagles image}
+
+renderUI({
+  
+  div(
+    
+    tags$img(src=filter(nfl_teams, team_abbr == teamTriCode) |> pull(team_logo_wikipedia),
+             height="75%",
+             width="75%"),
+    style="text-align:center;"
+    
+  )
+  
+  
+})
+```
+
+
+```{r selections from data}
+selectInput(
+  
+  inputId="pos",
+  label="Position",
+  choices=phi_roster %>% 
+             dplyr::pull(position) %>% 
+             sort() %>% unique(),
+  selected="OL",
+  multiple=FALSE
+  
+)
+
+
+renderUI({
+
+selectInput(
+  
+  inputId="player",
+  label="Select a Player",
+  choices=phi_roster %>% 
+             dplyr::filter(position==input$pos) %>% 
+             dplyr::pull(full_name) %>% 
+             sort() %>% unique(),
+  selected="Jason Kelce",
+  multiple=FALSE
+  
+)
+  
+})
+```
+
+
+```{r player image }
+renderUI({
+  
+  div(
+    
+    tags$img(src= filter(phi_roster, full_name == input$player) |> pull(headshot_url),
+             height="75%",
+             width="75%"),
+    style="text-align:center;"
+    
+  )
+  
+  
+})
+```
+
+
+```{r reactive player information}
+
+player <- reactive(
+  
+  phi_roster %>% 
+    dplyr::filter(full_name==input$player)
+  
+)
+
+```
+
+
+Row
+------
+
+
+###
+
+
+```{r}
+flexdashboard::renderValueBox({
+  
+  flexdashboard::valueBox(paste0("#",player()$jersey_number," ",input$player),
+                          caption=HTML(paste0("Ht/Wt: ",player()$height,"in.  ",player()$weight,"lbs. <br>
+                                              Position: ",player()$position,"<br>
+                                              Age: ",player()$age_string, "<br>
+                                              College: ",player()$college))
+  
+                                              
+                                              ,
+                          icon=NULL,
+                          href=paste0("https://espn.com/nfl")
+  )
+  
+  
+})
+```
+
+
+
+###
+
+
+```{r}
+
+```
+
+
+###
+
+
+```{r}
+
+```
+
+
+
+###
+
+
+```{r}
+
+```
+
+
+
+###
+
+
+```{r}
+
+```
+
+
+
+
+Row {.tabset}
+---------------
+
+### Overview
+
+```{r}
+
+```
+
+### News
+
+```{r}
+
+```
+
+### Stats
+
+```{r}
+
+```
+
+### Bio
+
+```{r}
+
+```
+
+### Splits
+
+```{r}
+
+```
+
+### Game Log
+
+```{r}
+
+```
+
+
+### Projections
+
+```{r}
+
+```
+
+
+### Injury Info
+
+```{r}
+
+```
+
+
+
+### Tech Metrics
+
+```{r}
+
+```
+
+
+### Scenario Tools
+
+```{r}
+
+```
+
+
+
+Row {.tabset}
+---------------
+
+### Position-Based Viz Tools
+
+```{r}
+
+```
+
+### League Comparison Viz Tools
+
+```{r}
+
+```
+
+
+### Motion Capture Viz Tools
+
+```{r}
+
+```
+
+
+### Lab Result Reporting Tools
+
+```{r}
+
+```
+
+
+Team Strategy
+==============
+
+
+Wearables Hub
+==============
+
+
+Performance Plan Center
+========================
